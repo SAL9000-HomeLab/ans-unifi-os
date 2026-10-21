@@ -1,0 +1,8 @@
+---
+# Installs (or upgrades) UniFi OS Server on the hosts in the unifi_os_server group.
+
+- name: Install UniFi OS Server
+  hosts: unifi_os_server
+  become: true
+  roles:
+    - role: unifi_os_server

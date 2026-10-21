@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: Roland Serman
+  description: Installs and upgrades UniFi OS Server on Ubuntu with Ubiquiti's official installer
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+  galaxy_tags:
+    - unifi
+    - ubiquiti
+    - podman
+
+dependencies: []

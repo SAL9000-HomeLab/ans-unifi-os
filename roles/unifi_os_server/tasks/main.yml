@@ -1,0 +1,124 @@
+---
+# roles/unifi_os_server/tasks/main.yml
+
+- name: Check the host is a supported platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] is version('24.04', '>=')
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      UniFi OS Server needs Ubuntu 24.04 or later on x86_64 (this role downloads the linux-x64 installer); this host
+      is {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+      {{ ansible_facts['architecture'] }}.
+    quiet: true
+
+- name: Install the installer's dependencies
+  ansible.builtin.apt:
+    name: "{{ unifi_os_server_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Look for an installed UniFi OS Server
+  ansible.builtin.stat:
+    path: /usr/local/bin/uosserver
+  register: unifi_os_server_cli
+
+- name: Read the installed version
+  ansible.builtin.command:
+    argv: [/usr/local/bin/uosserver, version]
+  register: unifi_os_server_installed
+  changed_when: false
+  when: unifi_os_server_cli.stat.exists
+
+- name: Work out whether to install
+  ansible.builtin.set_fact:
+    unifi_os_server_current: "{{ unifi_os_server_installed.stdout | default('') | trim }}"
+    unifi_os_server_install: >-
+      {{ (unifi_os_server_installed.stdout | default('') | trim) == ''
+         or (unifi_os_server_installed.stdout | trim) is version(unifi_os_server_version, '<') }}
+
+- name: Report a newer version than the one pinned
+  ansible.builtin.debug:
+    msg: >-
+      UniFi OS Server {{ unifi_os_server_current }} is installed, newer than unifi_os_server_version
+      ({{ unifi_os_server_version }}), probably updated from its UI. Leaving it; pin the new version in the role's
+      variables.
+  when:
+    - unifi_os_server_current != ''
+    - unifi_os_server_current is version(unifi_os_server_version, '>')
+
+- name: Install or upgrade UniFi OS Server
+  when: unifi_os_server_install | bool
+  block:
+    - name: Create the download directory
+      ansible.builtin.file:
+        path: "{{ unifi_os_server_download_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Download the installer
+      ansible.builtin.get_url:
+        url: "{{ unifi_os_server_installer_url }}"
+        dest: "{{ unifi_os_server_download_dir }}/unifi-os-server-{{ unifi_os_server_version }}.run"
+        checksum: "sha256:{{ unifi_os_server_installer_sha256 }}"
+        owner: root
+        group: root
+        mode: "0700"
+        timeout: 120
+
+    # The installer creates the user uosserver, pulls nothing (the container image is inside it), and sets up the
+    # services uosserver and uosserver-updater. It exits 0 even when it fails, so the next task checks the result.
+    - name: Run the installer {{ unifi_os_server_version }}
+      ansible.builtin.command:
+        argv:
+          - "{{ unifi_os_server_download_dir }}/unifi-os-server-{{ unifi_os_server_version }}.run"
+          - --non-interactive
+          - --web-port
+          - "{{ unifi_os_server_web_port | string }}"
+      register: unifi_os_server_installer
+      changed_when: true
+
+    - name: Read the version the installer left
+      ansible.builtin.command:
+        argv: [/usr/local/bin/uosserver, version]
+      register: unifi_os_server_after
+      changed_when: false
+      failed_when: false
+
+    - name: Check the installer succeeded
+      ansible.builtin.assert:
+        that:
+          - (unifi_os_server_after.stdout | default('') | trim) == unifi_os_server_version
+        fail_msg: >-
+          After the installer, UniFi OS Server reports '{{ unifi_os_server_after.stdout | default('') | trim }}'
+          instead of {{ unifi_os_server_version }}. The installer's last lines:
+          {{ unifi_os_server_installer.stdout_lines[-15:] | default([]) | join(' | ') }}
+        quiet: true
+
+    - name: Delete the installer
+      ansible.builtin.file:
+        path: "{{ unifi_os_server_download_dir }}/unifi-os-server-{{ unifi_os_server_version }}.run"
+        state: absent
+
+- name: Enable and start UniFi OS Server's services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - uosserver-updater
+    - uosserver
+
+- name: Wait for the web UI
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ unifi_os_server_web_port }}/"
+    validate_certs: false
+    status_code: 200
+  register: unifi_os_server_web
+  until: unifi_os_server_web.status == 200
+  retries: "{{ (unifi_os_server_wait_timeout | int / 10) | int }}"
+  delay: 10
